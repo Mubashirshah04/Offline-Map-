@@ -127,7 +127,7 @@ app.post('/start-download', (req, res) => {
     const maxZ = 21; 
     let totalTotal = 0;
     const layers = ['google-street', 'satellite', 'arcgis-street', 'arcgis-satellite'];
-    const isStrategic = ['All Pakistan', 'Full Iran', 'Full Afghanistan'].includes(city);
+    const isStrategic = false; // Estimator: Applied Global Smart-Harvest
 
     // 📐 SMART ESTIMATOR (v117.0): Model the harvest before starting
     for (let z = 0; z <= maxZ; z++) {
@@ -195,18 +195,19 @@ app.post('/start-download', (req, res) => {
         const CONCURRENCY = 100; 
         let yieldCounter = 0;
 
-        // 🧠 OMEGA SMART HARVEST (v116.0): Urban Priority Logic
+        // 🧠 OMEGA SMART HARVEST (v133.0): Urban Priority Logic
         let urbanZones = [];
-        const isStrategic = ['All Pakistan', 'Full Iran', 'Full Afghanistan'].includes(city);
+        const isStrategic = false; // Applied Global Smart-Harvest: NO exceptions allowed to prevent DB explosion
         
         if (!isStrategic) {
-            const cleanCountry = city.replace('Full ', '').trim();
+            const cleanCountry = city.replace(/All |Full /ig, '').trim();
             console.log(`[SMART] 🔍 Mapping Urban Heat Zones for ${cleanCountry}...`);
             try {
-                const cityRes = await axios.get(`https://nominatim.openstreetmap.org/search?country=${cleanCountry}&featuretype=city&format=json&limit=50`, {
-                    headers: { 'User-Agent': 'OMEGA-GIS-Engine/118.0' }
+                // Fetch top 100 cities to ensure we don't miss any major populated area
+                const cityRes = await axios.get(`https://nominatim.openstreetmap.org/search?country=${cleanCountry}&featuretype=city&format=json&limit=100`, {
+                    headers: { 'User-Agent': 'OMEGA-GIS-Engine/133.0' }
                 });
-                urbanZones = cityRes.data.map(c => ({ lat: parseFloat(c.lat), lon: parseFloat(c.lon), r: 0.15 })); 
+                urbanZones = cityRes.data.map(c => ({ lat: parseFloat(c.lat), lon: parseFloat(c.lon), r: 0.20 })); // Slightly larger radius
                 console.log(`[SMART] 📍 Found ${urbanZones.length} HD zones.`);
             } catch (e) { 
                 console.warn(`[SMART] ⚠️ Could not map ${cleanCountry}: ${e.message}`); 
@@ -219,6 +220,7 @@ app.post('/start-download', (req, res) => {
                 
                 // 🛑 SMART CAP: Non-strategic countries stop at Z18 for non-urban areas
                 const isDeepZoom = z > 18;
+                const isMountainZoom = z > 19;
                 
                 const nw_c = latLngToTile(Math.max(activeBbox[1], activeBbox[3]), Math.min(activeBbox[0], activeBbox[2]), z);
                 const se_c = latLngToTile(Math.min(activeBbox[1], activeBbox[3]), Math.max(activeBbox[0], activeBbox[2]), z);
@@ -227,9 +229,15 @@ app.post('/start-download', (req, res) => {
                     for (let y = Math.min(nw_c.y, se_c.y); y <= Math.max(nw_c.y, se_c.y); y++) {
                         if (!downloadQueue.active) break;
                         
-                        // 🧠 SMART FILTER: If Z > 18 and NOT in a strategic zone or urban zone, SKIP.
+                        // 🧠 SMART FILTER: Enforce limits based on region
+                        const tileLatLon = tileToLatLng(x, y, z);
+                        
+                        // Cap mountainous/northern areas (Lat > 33.5) to Z19 absolute max
+                        if (isMountainZoom && tileLatLon.lat > 33.5 && city.includes('Pakistan')) {
+                            continue; // Skip Z20/Z21 in northern mountains completely
+                        }
+
                         if (isDeepZoom && !isStrategic) {
-                            const tileLatLon = tileToLatLng(x, y, z);
                             const inZone = urbanZones.some(u => 
                                 Math.abs(u.lat - tileLatLon.lat) < u.r && Math.abs(u.lon - tileLatLon.lon) < u.r
                             );
