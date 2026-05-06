@@ -34,24 +34,8 @@ function initDB() {
 
         db.run("CREATE TABLE IF NOT EXISTS downloads (city TEXT PRIMARY KEY, status TEXT, size_mb REAL, completed_tiles INTEGER, total_tiles INTEGER, total_mb REAL, bbox TEXT)");
         db.run("CREATE TABLE IF NOT EXISTS tiles (layer TEXT, z INTEGER, x INTEGER, y INTEGER, data BLOB, PRIMARY KEY(layer, z, x, y))");
-        
-        // 🩺 Deep Startup Integrity Check
-        db.get("PRAGMA integrity_check", (err, row) => {
-            if (err || (row && row.integrity_check !== 'ok')) {
-                console.error("\n🛑 ALERT: DATABASE CORRUPTION DETECTED!");
-                console.log("🛠️ Attempting Auto-Repair (VACCUM)...");
-                db.run("VACUUM", (vErr) => {
-                    if (vErr) {
-                        console.error("❌ Auto-Repair Failed. Corruption is deep.");
-                        console.error("👉 ACTION REQUIRED: Run 'node omega_rescue.js' to salvage data.\n");
-                    } else {
-                        console.log("✅ Auto-Repair Successful! Integrity restored.");
-                    }
-                });
-            } else {
-                console.log("✅ Database Integrity: [SOLID]");
-            }
-        });
+
+        console.log("✅ Database Engine Online [WAL-Mode Active]");
     });
 }
 initDB();
@@ -104,7 +88,7 @@ app.get('/tiles/:layer/:z/:x/:y.png', async (req, res) => {
 
 app.post('/start-download', (req, res) => {
     const { city, bbox } = req.body;
-    
+
     // 🌍 CORE STRATEGIC TARGETS (High-Precision)
     const targets = {
         'All Pakistan': [60.8, 23.6, 77.9, 37.1],
@@ -124,7 +108,7 @@ app.post('/start-download', (req, res) => {
 
     if (!activeBbox) return res.status(400).json({ error: "Missing Bounding Box" });
 
-    const maxZ = 21; 
+    const maxZ = 21;
     let totalTotal = 0;
     const layers = ['google-street', 'satellite', 'arcgis-street', 'arcgis-satellite'];
     const isStrategic = false; // Estimator: Applied Global Smart-Harvest
@@ -134,17 +118,17 @@ app.post('/start-download', (req, res) => {
         const nw = latLngToTile(Math.max(activeBbox[1], activeBbox[3]), Math.min(activeBbox[0], activeBbox[2]), z);
         const se = latLngToTile(Math.min(activeBbox[1], activeBbox[3]), Math.max(activeBbox[0], activeBbox[2]), z);
         const layerTiles = (Math.abs(se.x - nw.x) + 1) * (Math.abs(se.y - nw.y) + 1);
-        
+
         if (z <= 18 || isStrategic) {
             totalTotal += layerTiles;
         } else {
-            totalTotal += (50 * 25000) / (maxZ - 18); 
+            totalTotal += (50 * 25000) / (maxZ - 18);
         }
     }
-    
+
     const finalTotal = Math.floor(totalTotal * layers.length);
-    let finalTotalMb = (finalTotal * 0.006); 
-    
+    let finalTotalMb = (finalTotal * 0.006);
+
     // 💎 PROPORTIONAL BUDGET SCALING (v125.0)
     const strategicBudgets = {
         'all pakistan': 250000,
@@ -161,7 +145,7 @@ app.post('/start-download', (req, res) => {
         'gilgit-baltistan': 12000,
         'ajk': 8000
     };
-    
+
     const cityKey = city.toLowerCase().trim();
     if (strategicBudgets[cityKey]) {
         finalTotalMb = strategicBudgets[cityKey];
@@ -170,35 +154,35 @@ app.post('/start-download', (req, res) => {
         let lonDiff = Math.abs(activeBbox[2] - activeBbox[0]);
         if (lonDiff > 180) lonDiff = 360 - lonDiff; // Handle wrap-around
         const latDiff = Math.abs(activeBbox[3] - activeBbox[1]);
-        
+
         const areaSqDeg = lonDiff * latDiff;
-        const pkBenchmark = 230; 
+        const pkBenchmark = 230;
         const ratio = areaSqDeg / pkBenchmark;
         // 💎 PURE PROPORTIONAL (v128.0): Min 5GB Baseline
-        finalTotalMb = Math.min(1000000, Math.max(5120, ratio * 250000)); 
+        finalTotalMb = Math.min(1000000, Math.max(5120, ratio * 250000));
         console.log(`[OMEGA] 📐 Scaled Budget for ${city}: ${finalTotalMb.toFixed(0)} MB (Ratio: ${ratio.toFixed(2)})`);
     }
 
-    downloadQueue = { 
-        total: finalTotal, completed: 0, bytes: 0, active: true, paused: false, city, 
-        totalMb: parseFloat(finalTotalMb), 
-        bbox: activeBbox 
+    downloadQueue = {
+        total: finalTotal, completed: 0, bytes: 0, active: true, paused: false, city,
+        totalMb: parseFloat(finalTotalMb),
+        bbox: activeBbox
     };
-    
+
     // 🚩 SAVE METRICS TO DB (v123.0: Persist Calibrated Budget)
-    db.run("INSERT OR REPLACE INTO downloads (city, status, size_mb, completed_tiles, total_tiles, total_mb, bbox) VALUES (?,?,?,?,?,?,?)", 
+    db.run("INSERT OR REPLACE INTO downloads (city, status, size_mb, completed_tiles, total_tiles, total_mb, bbox) VALUES (?,?,?,?,?,?,?)",
         [city, 'Downloading', 0, 0, finalTotal, finalTotalMb, JSON.stringify(activeBbox)]);
     res.json({ status: "started", total: finalTotal });
 
     (async () => {
         const activePromises = new Set();
-        const CONCURRENCY = 100; 
+        const CONCURRENCY = 100;
         let yieldCounter = 0;
 
         // 🧠 OMEGA SMART HARVEST (v133.0): Urban Priority Logic
         let urbanZones = [];
         const isStrategic = false; // Applied Global Smart-Harvest: NO exceptions allowed to prevent DB explosion
-        
+
         if (!isStrategic) {
             const cleanCountry = city.replace(/All |Full /ig, '').trim();
             console.log(`[SMART] 🔍 Mapping Urban Heat Zones for ${cleanCountry}...`);
@@ -209,39 +193,54 @@ app.post('/start-download', (req, res) => {
                 });
                 urbanZones = cityRes.data.map(c => ({ lat: parseFloat(c.lat), lon: parseFloat(c.lon), r: 0.20 })); // Slightly larger radius
                 console.log(`[SMART] 📍 Found ${urbanZones.length} HD zones.`);
-            } catch (e) { 
-                console.warn(`[SMART] ⚠️ Could not map ${cleanCountry}: ${e.message}`); 
+            } catch (e) {
+                console.warn(`[SMART] ⚠️ Could not map ${cleanCountry}: ${e.message}`);
+                // 🛡️ BULLETPROOF FALLBACK: If API fails, guarantee Pakistan's cities are covered to secure client delivery
+                if (cleanCountry.toLowerCase().includes('pakistan')) {
+                    console.log(`[SMART] 🛡️ Activating Bulletproof Fallback for Pakistan...`);
+                    urbanZones = [
+                        { lat: 24.8607, lon: 67.0011, r: 0.25 }, // Karachi
+                        { lat: 31.5204, lon: 74.3587, r: 0.20 }, // Lahore
+                        { lat: 33.6844, lon: 73.0479, r: 0.15 }, // Islamabad
+                        { lat: 33.5956, lon: 73.0560, r: 0.15 }, // Rawalpindi
+                        { lat: 31.4181, lon: 73.0776, r: 0.15 }, // Faisalabad
+                        { lat: 30.1575, lon: 71.5249, r: 0.15 }, // Multan
+                        { lat: 34.0151, lon: 71.5249, r: 0.15 }, // Peshawar
+                        { lat: 30.1798, lon: 66.9750, r: 0.15 }, // Quetta
+                        { lat: 32.1617, lon: 74.1883, r: 0.15 }  // Gujranwala
+                    ];
+                }
             }
         }
 
         try {
             for (let z = 0; z <= maxZ; z++) {
                 if (!downloadQueue.active) break;
-                
+
                 // 🛑 SMART CAP: Non-strategic countries stop at Z18 for non-urban areas
                 const isDeepZoom = z > 18;
                 const isMountainZoom = z > 19;
-                
+
                 const nw_c = latLngToTile(Math.max(activeBbox[1], activeBbox[3]), Math.min(activeBbox[0], activeBbox[2]), z);
                 const se_c = latLngToTile(Math.min(activeBbox[1], activeBbox[3]), Math.max(activeBbox[0], activeBbox[2]), z);
-                
+
                 for (let x = Math.min(nw_c.x, se_c.x); x <= Math.max(nw_c.x, se_c.x); x++) {
                     for (let y = Math.min(nw_c.y, se_c.y); y <= Math.max(nw_c.y, se_c.y); y++) {
                         if (!downloadQueue.active) break;
-                        
+
                         // 🧠 SMART FILTER: Enforce limits based on region
                         const tileLatLon = tileToLatLng(x, y, z);
-                        
+
                         // Cap mountainous/northern areas (Lat > 33.5) to Z19 absolute max
                         if (isMountainZoom && tileLatLon.lat > 33.5 && city.includes('Pakistan')) {
                             continue; // Skip Z20/Z21 in northern mountains completely
                         }
 
                         if (isDeepZoom && !isStrategic) {
-                            const inZone = urbanZones.some(u => 
+                            const inZone = urbanZones.some(u =>
                                 Math.abs(u.lat - tileLatLon.lat) < u.r && Math.abs(u.lon - tileLatLon.lon) < u.r
                             );
-                            if (!inZone) continue; 
+                            if (!inZone) continue;
                         }
 
                         yieldCounter++;
@@ -255,14 +254,14 @@ app.post('/start-download', (req, res) => {
                                 try {
                                     await getTileWithFallback(layer, z, x, y);
                                     downloadQueue.completed++;
-                                } catch (err) {} 
+                                } catch (err) { }
                             })();
                             activePromises.add(p);
                             p.finally(() => activePromises.delete(p));
-                            
+
                             if (activePromises.size >= CONCURRENCY) await Promise.race(activePromises);
                             if (downloadQueue.completed % 500 === 0) {
-                                db.run("UPDATE downloads SET size_mb=?, completed_tiles=? WHERE city=?", [(downloadQueue.bytes/(1024*1024)).toFixed(2), downloadQueue.completed, city]);
+                                db.run("UPDATE downloads SET size_mb=?, completed_tiles=? WHERE city=?", [(downloadQueue.bytes / (1024 * 1024)).toFixed(2), downloadQueue.completed, city]);
                             }
                         }
                     }
@@ -270,14 +269,14 @@ app.post('/start-download', (req, res) => {
                 }
             }
             if (activePromises.size > 0) await Promise.all(activePromises);
-        } catch (e) { 
+        } catch (e) {
             console.error("[OMEGA] Heavy-Duty Harvester Error:", e);
             db.run("UPDATE downloads SET status='Error' WHERE city=?", [city]);
         }
 
         downloadQueue.active = false;
-        db.run("UPDATE downloads SET status='Completed', size_mb=?, completed_tiles=? WHERE city=?", 
-            [(downloadQueue.bytes/(1024*1024)).toFixed(2), downloadQueue.completed, city]);
+        db.run("UPDATE downloads SET status='Completed', size_mb=?, completed_tiles=? WHERE city=?",
+            [(downloadQueue.bytes / (1024 * 1024)).toFixed(2), downloadQueue.completed, city]);
     })();
 });
 
@@ -286,7 +285,7 @@ app.post('/start-download', (req, res) => {
 app.get('/api/search', async (req, res) => {
     const { q, countrycodes, limit } = req.query;
     if (!q) return res.json([]);
-    
+
     try {
         const response = await axios.get(`https://nominatim.openstreetmap.org/search`, {
             params: {
@@ -313,18 +312,18 @@ app.post('/delete-download', (req, res) => { db.run("DELETE FROM downloads WHERE
 // ☢️ NUCLEAR RESET: PERMANENT DISK PURGE (v106.0)
 app.post('/delete-all-data', (req, res) => {
     console.log("[OMEGA] ☢️ NUCLEAR RESET INITIATED...");
-    
+
     // 1. Clear physical tiles folder
     const tilesDir = path.join(__dirname, 'wwwroot', 'tiles');
     if (fs.existsSync(tilesDir)) {
-        try { fs.rmSync(tilesDir, { recursive: true, force: true }); fs.mkdirSync(tilesDir, { recursive: true }); } catch (e) {}
+        try { fs.rmSync(tilesDir, { recursive: true, force: true }); fs.mkdirSync(tilesDir, { recursive: true }); } catch (e) { }
     }
 
     // 2. Kill DB connection and Delete tiles.db for 100% space recovery
     db.close((err) => {
         const files = [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`];
         files.forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
-        
+
         console.log("[OMEGA] ☢️ Disk files purged. Re-initializing empty database...");
         initDB(); // Restart fresh
         res.json({ success: true });
@@ -341,7 +340,7 @@ function updateInventory(city, deltaMb, deltaTiles, status = 'Completed', bbox =
         } else if (row) {
             currentBbox = JSON.parse(row.bbox || 'null');
         }
-        
+
         let targetTiles = (row ? row.total_tiles : 0);
         if (city === 'Auto-Discovered Data' && currentBbox) {
             let scope = 0;
@@ -355,7 +354,7 @@ function updateInventory(city, deltaMb, deltaTiles, status = 'Completed', bbox =
 
         const size = (row ? row.size_mb : 0) + deltaMb;
         const tiles = (row ? row.completed_tiles : 0) + deltaTiles;
-        
+
         db.run("INSERT OR REPLACE INTO downloads (city, status, size_mb, completed_tiles, total_tiles, bbox) VALUES (?,?,?,?,?,?)",
             [city, status, size, tiles, targetTiles, JSON.stringify(currentBbox)]);
     });
@@ -385,41 +384,41 @@ async function startHarvesting() {
     if (isDiscovering) { console.log('[HARVEST] Already running, skip.'); return; }
     isDiscovering = true;
     const layers = ['google-street', 'satellite', 'arcgis-street', 'arcgis-satellite'];
-    
+
     try {
-        const row = await new Promise(resolve => 
-            db.get("SELECT bbox, total_tiles, size_mb, completed_tiles FROM downloads WHERE city=?", 
+        const row = await new Promise(resolve =>
+            db.get("SELECT bbox, total_tiles, size_mb, completed_tiles FROM downloads WHERE city=?",
                 [autoCity], (err, r) => resolve(r))
         );
-        
-        if (!row || !row.bbox) { 
+
+        if (!row || !row.bbox) {
             console.log('[HARVEST] ❌ No scope found in DB. Plan first (turn ON and move map).');
-            isDiscovering = false; 
-            return; 
+            isDiscovering = false;
+            return;
         }
-        
+
         const scopeBbox = JSON.parse(row.bbox);
-        autoHarvestingStatus = { 
-            active: true, 
-            completed: row.completed_tiles || 0, 
-            total: row.total_tiles || 0, 
-            mb: parseFloat(row.size_mb) || 0 
+        autoHarvestingStatus = {
+            active: true,
+            completed: row.completed_tiles || 0,
+            total: row.total_tiles || 0,
+            mb: parseFloat(row.size_mb) || 0
         };
-        
-        const zoomTiers = [[15,16,17,18], [19,20,21]];
+
+        const zoomTiers = [[15, 16, 17, 18], [19, 20, 21]];
         for (const tier of zoomTiers) {
             for (const z of tier) {
                 if (autoMissionActive) break;
-                
+
                 const nw = latLngToTile(Math.max(scopeBbox[1], scopeBbox[3]), Math.min(scopeBbox[0], scopeBbox[2]), z);
                 const se = latLngToTile(Math.min(scopeBbox[1], scopeBbox[3]), Math.max(scopeBbox[0], scopeBbox[2]), z);
-                
+
                 const minX = Math.min(nw.x, se.x), maxX = Math.max(nw.x, se.x);
                 const minY = Math.min(nw.y, se.y), maxY = Math.max(nw.y, se.y);
-                
+
                 let activePromises = new Set();
                 const CONCURRENCY = 100; // Increased stability
-                
+
                 for (let x = minX; x <= maxX; x++) {
                     for (let y = minY; y <= maxY; y++) {
                         if (autoMissionActive) break;
@@ -429,13 +428,13 @@ async function startHarvesting() {
                                     // Use unified fallback logic to handle all layers
                                     await getTileWithFallback(layer, z, x, y);
                                     autoHarvestingStatus.completed += 1;
-                                    
+
                                     if (autoHarvestingStatus.completed % 250 === 0) {
-                                        autoHarvestingStatus.mb = downloadQueue.bytes / (1024*1024); // Update from core counter
-                                        db.run("UPDATE downloads SET size_mb=?, completed_tiles=? WHERE city=?", 
+                                        autoHarvestingStatus.mb = downloadQueue.bytes / (1024 * 1024); // Update from core counter
+                                        db.run("UPDATE downloads SET size_mb=?, completed_tiles=? WHERE city=?",
                                             [autoHarvestingStatus.mb.toFixed(2), autoHarvestingStatus.completed, autoCity]);
                                     }
-                                } catch (tileErr) {}
+                                } catch (tileErr) { }
                             })();
                             activePromises.add(p);
                             p.finally(() => activePromises.delete(p));
@@ -448,41 +447,41 @@ async function startHarvesting() {
             }
             if (autoMissionActive) break;
         }
-        
+
         if (!autoMissionActive) {
             db.run("UPDATE downloads SET status='Completed' WHERE city=?", [autoCity]);
             console.log(`[HARVEST] 🏁 COMPLETE! ${autoHarvestingStatus.completed} tiles | ${autoHarvestingStatus.mb.toFixed(1)} MB`);
         } else {
             console.log(`[HARVEST] 🛑 PAUSED BY USER! Saved ${autoHarvestingStatus.completed} tiles`);
         }
-    } catch (e) { 
-        console.error('[HARVEST] ❌ Fatal Error:', e); 
+    } catch (e) {
+        console.error('[HARVEST] ❌ Fatal Error:', e);
     } finally {
-        isDiscovering = false; 
-        autoHarvestingStatus.active = false; 
+        isDiscovering = false;
+        autoHarvestingStatus.active = false;
     }
 }
 
 app.get('/download-status', (req, res) => {
     // 🛡️ UNIVERSAL STATUS REPORTER (v105.0)
     if (downloadQueue.active) {
-        const mb = (downloadQueue.bytes / (1024*1024)).toFixed(2);
-        return res.json({ 
-            ...downloadQueue, 
-            mb, 
-            totalMb: downloadQueue.totalMb.toFixed(2), 
-            totalTiles: downloadQueue.total, 
-            completedTiles: downloadQueue.completed 
+        const mb = (downloadQueue.bytes / (1024 * 1024)).toFixed(2);
+        return res.json({
+            ...downloadQueue,
+            mb,
+            totalMb: downloadQueue.totalMb.toFixed(2),
+            totalTiles: downloadQueue.total,
+            completedTiles: downloadQueue.completed
         });
     }
-    
+
     if (autoHarvestingStatus.active) {
-        return res.json({ 
-            active: true, 
-            city: '🛰️ Auto-Discovered Data', 
-            completed: autoHarvestingStatus.completed, 
-            total: autoHarvestingStatus.total, 
-            mb: autoHarvestingStatus.mb.toFixed(2), 
+        return res.json({
+            active: true,
+            city: '🛰️ Auto-Discovered Data',
+            completed: autoHarvestingStatus.completed,
+            total: autoHarvestingStatus.total,
+            mb: autoHarvestingStatus.mb.toFixed(2),
             totalMb: (autoHarvestingStatus.total * 0.006).toFixed(2),
             completedTiles: autoHarvestingStatus.completed,
             totalTiles: autoHarvestingStatus.total
@@ -529,13 +528,13 @@ app.post('/auto-discover', (req, res) => {
     });
 });
 
-app.post('/stop-download', (req, res) => { 
-    downloadQueue.active = false; 
+app.post('/stop-download', (req, res) => {
+    downloadQueue.active = false;
     autoMissionActive = true;     // PAUSE AUTO-HARVEST
     isDiscovering = false;        // Release auto-discover lock
     autoHarvestingStatus.active = false; // Turn off floating UI
     db.run("UPDATE downloads SET status='Paused' WHERE status LIKE '%Harvesting%' OR status LIKE '%Downloading%'");
-    res.json({ success: true }); 
+    res.json({ success: true });
 });
 
 // 🛡️ OMEGA REGIONAL GEOFENCE (v106.2 Refresh)
