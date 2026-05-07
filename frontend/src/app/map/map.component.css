@@ -193,13 +193,22 @@
 }
 
 .hud-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
+  display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;
 }
+.hud-controls-row { display:flex; align-items:center; gap:8px; }
+.control-btn { 
+  width: 28px; height: 28px; border-radius: 6px; border: none; cursor: pointer; 
+  display: flex; align-items: center; justify-content: center; font-size: 14px; 
+  transition: all 0.2s; color: white;
+}
+.control-btn.pause { background: #fbbc04; }
+.control-btn.resume { background: #34a853; }
+.control-btn.stop { background: #ea4335; }
+.control-btn:hover { transform: scale(1.1); filter: brightness(1.1); }
 
-.city-name { font-weight: 800; font-size: 14px; color: #202124; letter-spacing: -0.2px; }
+.hud-percentage { font-weight: 800; font-size: 16px; color: #1a73e8; }
+.paused-label { color: #fbbc04; font-weight: 800; font-size: 10px; letter-spacing: 1px; }
+.paused-fill { background: #9aa0a6 !important; }
 .delete-btn-hud { background: #fee2e2; color: #d93025; border: none; width: 32px; height: 32px; border-radius: 8px; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; box-shadow: 0 2px 6px rgba(217,48,37,0.2); }
 .delete-btn-hud:hover { background: #d93025; color: white; transform: scale(1.1); }
 .cancel-btn-hud { background: #fee2e2; color: #d93025; border: none; width: 24px; height: 24px; border-radius: 50%; font-size: 16px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
@@ -225,5 +234,22 @@
 }
 
 /* 🌑 DARK MODE FILTER */
-.dark-filter ::ng-deep .leaflet-tile-pane { filter: invert(100%) hue-rotate(180deg) brightness(0.9) contrast(1.1) !important; }
+.dark-filter ::ng-deep .maplibregl-canvas { filter: invert(100%) hue-rotate(180deg) brightness(0.9) contrast(1.1) !important; }
 .google-night-mode { filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%); }
+
+/* 🏙️ SEARCH SUGGESTIONS UI */
+.search-suggestions-container {
+    position: absolute; top: 100%; left: 60px; right: 0;
+    width: 392px; background: white; border-radius: 0 0 16px 16px;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+    margin-top: -10px; padding-top: 15px; padding-bottom: 8px;
+    z-index: 9998; border-top: 1px solid #eee;
+    max-height: 300px; overflow-y: auto;
+}
+.suggestion-item {
+    padding: 12px 20px; display: flex; align-items: center; gap: 12px;
+    cursor: pointer; transition: background 0.15s;
+}
+.suggestion-item:hover { background: #f8f9fa; }
+.suggestion-item .icon { font-size: 16px; color: #5f6368; }
+.suggestion-item .text { font-size: 14px; color: #202124; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

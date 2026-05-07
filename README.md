@@ -1,77 +1,95 @@
-Offline Map System – Setup Guide
-🛠️ Prerequisites
+# OMEGA Map Engine - Setup & User Guide
 
-Before starting, please make sure you have:
+Welcome to the **OMEGA Map Engine**, a professional-grade offline mapping solution. This system allows you to harvest and visualize high-definition map data (Street, Satellite, ArcGIS, and Night Mode) with precision up to Zoom Level 22.
 
-Node.js (v18 or higher) installed
-👉 Download: https://nodejs.org/
-🚀 Step 1: Start the Backend (Map Server)
+---
 
-The backend is responsible for serving map data and handling offline storage.
+## 🛠️ Prerequisites
 
-Follow these steps:
-Open Command Prompt / Terminal
-Go to the backend folder:
-cd backend
-Install required packages (first time only):
-npm install
-Start the server:
-node server.js
+Ensure you have the following installed before starting:
+*   **.NET 8.0 Core / Runtime**: [Download here](https://dotnet.microsoft.com/download/dotnet/8.0)
+*   **PostgreSQL (v16+)**: [Download here](https://www.postgresql.org/download/)
 
-✔ After running, the server will start on:
-👉 http://localhost:5000
+---
 
-⚠️ Keep this terminal open — do not close it.
+## 🚀 Step 1: Database Setup
 
-🗺️ Step 2: Start the Frontend (Map Interface)
+1.  Open **pgAdmin 4** or your preferred PostgreSQL tool.
+2.  Create a database named: `omega_gis`.
+3.  Execute the following SQL command to create the required table:
 
-This is the user interface where you will see and interact with the map.
+```sql
+CREATE TABLE downloads (
+    id SERIAL PRIMARY KEY,
+    city VARCHAR(255) UNIQUE,
+    status VARCHAR(50),
+    size_mb DOUBLE PRECISION,
+    completed_tiles BIGINT,
+    total_tiles BIGINT,
+    total_mb DOUBLE PRECISION,
+    bbox_json TEXT
+);
+```
 
-Follow these steps:
-Open a new terminal window
+---
 
-Go to the frontend folder:
+## 🏗️ Step 2: Backend Configuration
 
-cd frontend
-Install dependencies (first time only):
-npm install
+1.  Navigate to the `backend/` folder.
+2.  Open `appsettings.json`.
+3.  Update the **ConnectionStrings** with your PostgreSQL username and password:
+    ```json
+    "ConnectionStrings": {
+      "PostgreSQLConnection": "Host=localhost;Database=omega_gis;Username=YOUR_USERNAME;Password=YOUR_PASSWORD"
+    }
+    ```
+4.  Open a terminal in the `backend/` folder and run:
+    ```bash
+    dotnet run
+    ```
+    *Wait until you see "Application started" in the terminal.*
 
-Start the application:
-npm start
+---
 
-Open your browser and go to:
-👉 http://localhost:4200
-💡 How to Use the System
+## 🌐 Step 3: Frontend Setup
 
-📍 Explore Map
-Move around the map (zoom and pan)
-The system will automatically load map data
+1.  Open a **new** terminal in the `frontend/` folder.
+2.  Install the required packages (one-time only):
+    ```bash
+    npm install
+    ```
+3.  Start the user interface:
+    ```bash
+    npm start
+    ```
+4.  The map will open automatically at: **http://localhost:4200**
 
-💾 Offline Data Storage
-As you explore, the system saves map data locally
-You can use it later without internet
+---
 
-🧭 Location Feature
-Click “Locate Me” to find your current position
-⚠️ If it doesn’t work, please allow location permission in your browser
+## 💡 How to Use the System
 
-🗂️ Storage Management
-You can view downloaded map data
-Option available to clear storage if needed
+4.  The system will start downloading 4 distinct layers:
+    *   **Street**: Standard Google-style view.
+    *   **Satellite**: High-definition aerial imagery.
+    *   **ArcGIS**: Professional topographic data.
+    *   **Night Mode**: Ultra-HD dark theme.
 
-⚠️ Important Notes
-Backend (server.js) must always be running
-First-time loading may take a few seconds
-Zoom levels above 21 depend on available data
-System works both online and offline
+### 📊 Monitoring Progress
+*   Check the **Status Bar** at the bottom for real-time Percentage, MBs, and Tile counts.
+*   Use the **Pause** ⏸ or **Stop/Delete** ⏹ buttons as needed.
+*   **Note**: Deleting a task instantly kills the background process and cleans up system resources.
 
-✅ System Features
-✔ Smooth map navigation
-✔ Offline map support
-✔ Automatic data download
-✔ Reliable storage system
-✔ Zoom support up to 21 (based on available data)
+### 🗺️ Offline Viewing
+*   Once a download is complete (or partially finished), switch map layers using the control in the top-right corner.
+*   Zoom in up to **Z22** for extreme HD detail.
 
-🧠 Final Note
+---
 
-This system is designed to provide a Google Maps-like experience, with the added benefit of offline functionality and data control.
+## ⚠️ Important Notes
+*   **Always keep the Backend terminal running** while using the map.
+*   Large areas (like full countries) can take significant disk space and time.
+*   The engine is optimized for **SSD storage** and **high-speed multi-threading**.
+
+---
+**OMEGA Map - Professional Edition**
+*Powered by High-Performance GIS Architecture*
