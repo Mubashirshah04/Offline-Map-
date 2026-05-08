@@ -100,30 +100,28 @@ namespace PakistanMaps.Services
 
                 await Parallel.ForEachAsync(tiles, new ParallelOptions { MaxDegreeOfParallelism = 32, CancellationToken = taskCts.Token }, async (tile, ct) =>
                 {
-                    // ⏸️ FAST STATUS CHECK: Kill threads if task is gone from DB
-                    if (completed % 5 == 0) 
-                    {
-                        await dbSemaphore.WaitAsync(ct);
-                        try {
-                            using var checkConn = new NpgsqlConnection(pgConnString);
-                            var currentTask = await checkConn.QueryFirstOrDefaultAsync<dynamic>("SELECT status FROM downloads WHERE city = @City", new { task.City });
-                            
-                            if (currentTask == null || currentTask.status == "Stopped" || currentTask.status == "Error") {
-                                _logger.LogInformation($"[OMEGA] KILL SIGNAL RECEIVED for {task.City}. Aborting all threads.");
-                                taskCts.Cancel(); // 🛑 This kills ALL 32 threads for this task instantly
-                                return;
-                            }
+                    // ⏸️ INSTANT STATUS CHECK: Check every single tile (instead of every 5)
+                    await dbSemaphore.WaitAsync(ct);
+                    try {
+                        using var checkConn = new NpgsqlConnection(pgConnString);
+                        var currentTask = await checkConn.QueryFirstOrDefaultAsync<dynamic>("SELECT status FROM downloads WHERE city = @City", new { task.City });
+                        
+                        if (currentTask == null || currentTask.status == "Stopped" || currentTask.status == "Error") {
+                            _logger.LogInformation($"[OMEGA] KILL SIGNAL RECEIVED for {task.City}. Aborting all threads.");
+                            taskCts.Cancel(); 
+                            return;
+                        }
 
-                            string currentStatus = currentTask.status;
-                            while (currentStatus == "Paused")
-                            {
-                                await Task.Delay(2000, ct); 
+                        if (currentTask.status == "Paused") {
+                            _logger.LogInformation($"[OMEGA] PAUSE SIGNAL for {task.City}. Waiting...");
+                            while (currentTask.status == "Paused") {
+                                await Task.Delay(500, ct); // Faster polling for instant resume
                                 currentTask = await checkConn.QueryFirstOrDefaultAsync<dynamic>("SELECT status FROM downloads WHERE city = @City", new { task.City });
                                 if (currentTask == null || currentTask.status == "Stopped") { taskCts.Cancel(); return; }
-                                currentStatus = currentTask.status;
                             }
-                        } finally { dbSemaphore.Release(); }
-                    }
+                            _logger.LogInformation($"[OMEGA] RESUME SIGNAL for {task.City}. Continuing...");
+                        }
+                    } finally { dbSemaphore.Release(); }
 
                     // 🛰️ MULTI-LAYER HARVESTING (Street, Satellite, ArcGIS, Night)
                     var layers = new[] {

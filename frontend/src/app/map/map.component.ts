@@ -138,6 +138,9 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
     const cache = localStorage.getItem('omega_regions_cache');
     if (cache) this.downloadedRegions = JSON.parse(cache);
 
+    const activeCache = localStorage.getItem('omega_active_download');
+    if (activeCache) this.downloadStatus = JSON.parse(activeCache);
+
     this.loadDownloadedRegions();
     this.startStatsPolling();
 
@@ -545,7 +548,10 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
               totalMb: status.totalMb,
               paused: status.paused || false
             };
+            // Cache active state so refresh doesn't hide it
+            localStorage.setItem('omega_active_download', JSON.stringify(this.downloadStatus));
         } else {
+          localStorage.removeItem('omega_active_download');
           const auto = this.downloadedRegions.find(r => r.city === 'Auto-Discovered Data');
           if (auto && (auto.status.includes('Capturing') || auto.status.includes('Harvesting') || auto.status.includes('Planning'))) {
             this.downloadStatus = {
