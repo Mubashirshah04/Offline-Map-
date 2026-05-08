@@ -26,7 +26,7 @@ builder.Services.AddCors(options =>
     options.AddPolicy("AllowAngular",
         policy =>
         {
-            policy.WithOrigins("http://localhost:4200")
+            policy.AllowAnyOrigin()
                   .AllowAnyHeader()
                   .AllowAnyMethod();
         });
@@ -81,9 +81,17 @@ provider.Mappings[".pmtiles"] = "application/octet-stream";
 
 app.UseStaticFiles(new StaticFileOptions
 {
-    ContentTypeProvider = provider
+    ContentTypeProvider = provider,
+    OnPrepareResponse = ctx =>
+    {
+        // Cache tiles for 7 days to reduce server load and increase speed
+        if (ctx.Context.Request.Path.Value?.Contains("/tiles/") == true)
+        {
+            ctx.Context.Response.Headers.Append("Cache-Control", "public, max-age=604800");
+        }
+    }
 });
-app.UseHttpsRedirection();
+// app.UseHttpsRedirection(); // 🛠️ DISABLED for Local Dev Stability
 app.UseAuthorization();
 app.MapControllers();
 app.MapGet("/health", () => Results.Ok("Tile server is running."));

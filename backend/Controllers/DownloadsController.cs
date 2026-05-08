@@ -10,11 +10,13 @@ namespace PakistanMaps.Controllers
     {
         private readonly NpgsqlConnection _db;
         private readonly TileDownloaderService _downloader;
+        private readonly IHttpClientFactory _httpClientFactory;
 
-        public DownloadsController(NpgsqlConnection db, TileDownloaderService downloader)
+        public DownloadsController(NpgsqlConnection db, TileDownloaderService downloader, IHttpClientFactory httpClientFactory)
         {
             _db = db;
             _downloader = downloader;
+            _httpClientFactory = httpClientFactory;
         }
 
         [HttpGet("/all-downloads")]
@@ -27,6 +29,27 @@ namespace PakistanMaps.Controllers
         [HttpGet("/download-status")]
         public async Task<IActionResult> GetDownloadStatus()
         {
+            // 🚀 INSTANT MEMORY-SYNC: Check the background service memory first
+            string? activeCity = _downloader.GetActiveCity();
+            if (!string.IsNullOrEmpty(activeCity))
+            {
+                var progress = _downloader.GetProgress(activeCity);
+                if (progress != null)
+                {
+                    return Ok(new {
+                        active = true,
+                        city = activeCity,
+                        completed = progress.Value.completed,
+                        total = progress.Value.total,
+                        mb = progress.Value.sizeMb,
+                        totalMb = progress.Value.total * 0.015,
+                        status = progress.Value.paused ? "Paused" : "Harvesting Raster Tiles",
+                        paused = progress.Value.paused
+                    });
+                }
+            }
+
+            // Fallback to DB for persistent states (Paused/Queued)
             var activeDownload = await _db.QueryFirstOrDefaultAsync("SELECT * FROM downloads WHERE status IN ('Queued', 'Harvesting Raster Tiles', 'Harvesting', 'Paused') LIMIT 1");
             if (activeDownload != null)
             {
@@ -106,6 +129,10 @@ namespace PakistanMaps.Controllers
         {
             // 🛑 SIGNAL STOP: First set status to 'Stopped' so the worker sees it and exits immediately
             await _db.ExecuteAsync("UPDATE downloads SET status = 'Stopped' WHERE city = @City", new { City = req.City });
+            
+            // 🚀 INSTANT SYNC: Clear memory tracker so UI doesn't show ghost progress
+            _downloader.ClearProgress(req.City);
+
             await Task.Delay(500); // Give worker threads a small window to see the 'Stopped' signal
 
             // 🗑️ PERMANENT DELETE: Now that workers are terminating, safely remove the record
@@ -142,10 +169,10 @@ namespace PakistanMaps.Controllers
         {
             if (string.IsNullOrEmpty(q)) return Ok(new List<object>());
             try {
-                using var client = new HttpClient();
-                client.Timeout = TimeSpan.FromSeconds(5); // ⏱️ TIMEOUT TO PREVENT HANGS
+                using var client = _httpClientFactory.CreateClient();
+                client.Timeout = TimeSpan.FromSeconds(5); 
                 client.DefaultRequestHeaders.Add("User-Agent", "OMEGA-GIS-Engine");
-                var response = await client.GetAsync($"https://nominatim.openstreetmap.org/search?q={q}&format=json&limit=5");
+                var response = await client.GetAsync($"https://nominatim.openstreetmap.org/search?q={Uri.EscapeDataString(q)}&format=json&limit=5");
                 
                 if (!response.IsSuccessStatusCode) return Ok(new List<object>()); 
                 

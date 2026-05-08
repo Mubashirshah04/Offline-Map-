@@ -9,8 +9,10 @@ namespace PakistanMaps.Services
     {
         private readonly IConfiguration _config;
         private readonly ILogger<TileDownloaderService> _logger;
-        private readonly ConcurrentQueue<DownloadTask> _queue = new();
         private readonly IHttpClientFactory _httpClientFactory;
+        private readonly ConcurrentQueue<DownloadTask> _queue = new();
+        private readonly ConcurrentDictionary<string, (long completed, long total, double sizeMb, bool paused)> _progressTracker = new();
+        private readonly SemaphoreSlim _ioSemaphore = new(64); // Prevent disk saturation
 
         public TileDownloaderService(IConfiguration config, ILogger<TileDownloaderService> logger, IHttpClientFactory httpClientFactory)
         {
@@ -24,12 +26,32 @@ namespace PakistanMaps.Services
             _queue.Enqueue(new DownloadTask { City = city, Bbox = bbox });
         }
 
+        public (long completed, long total, double sizeMb, bool paused)? GetProgress(string city)
+        {
+            if (_progressTracker.TryGetValue(city, out var progress)) return progress;
+            return null;
+        }
+
+        public string? GetActiveCity()
+        {
+            return _progressTracker.Keys.FirstOrDefault();
+        }
+
+        public void ClearProgress(string city)
+        {
+            _progressTracker.TryRemove(city, out _);
+        }
+
+        private bool _isInternetAvailable = true;
+        private int _consecutiveErrors = 0;
+
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             // 🔄 STARTUP RECOVERY: Re-enqueue unfinished tasks from DB
             string pgConnString = _config.GetConnectionString("PostgreSQLConnection")!;
             try {
                 using var conn = new NpgsqlConnection(pgConnString);
+                // Optimization: Only select what's needed
                 var unfinished = await conn.QueryAsync<DownloadTask>("SELECT city, bbox_json as BboxJson FROM downloads WHERE status IN ('Queued', 'Harvesting Raster Tiles', 'Harvesting', 'Paused')");
                 foreach (var task in unfinished) {
                     if (!string.IsNullOrEmpty(task.BboxJson)) {
@@ -37,7 +59,22 @@ namespace PakistanMaps.Services
                         EnqueueDownload(task.City, task.Bbox);
                     }
                 }
-            } catch (Exception ex) { _logger.LogError($"Recovery Error: {ex.Message}"); }
+            } catch (Exception ex) { _logger.LogError($"[OMEGA SHIELD] Recovery Error: {ex.Message}"); }
+
+            // 🚀 BATCH UPDATE ENGINE: Periodically sync progress to DB to reduce load
+            _ = Task.Run(async () =>
+            {
+                while (!stoppingToken.IsCancellationRequested)
+                {
+                    try {
+                        await Task.Delay(5000, stoppingToken);
+                        await SyncProgressToDbAsync();
+                        
+                        // Self-Healing: Reset error counter if DB is responsive
+                        if (_consecutiveErrors > 100) _consecutiveErrors = 50; 
+                    } catch { /* Silent */ }
+                }
+            }, stoppingToken);
 
             while (!stoppingToken.IsCancellationRequested)
             {
@@ -47,8 +84,23 @@ namespace PakistanMaps.Services
                 }
                 else
                 {
-                    await Task.Delay(1000, stoppingToken);
+                    await Task.Delay(5000, stoppingToken); // Slower idle polling to save CPU
                 }
+            }
+        }
+
+        private async Task SyncProgressToDbAsync()
+        {
+            string pgConnString = _config.GetConnectionString("PostgreSQLConnection")!;
+            foreach (var entry in _progressTracker)
+            {
+                try
+                {
+                    using var conn = new NpgsqlConnection(pgConnString);
+                    await conn.ExecuteAsync("UPDATE downloads SET completed_tiles = @Completed, size_mb = @SizeMb WHERE city = @City", 
+                        new { Completed = entry.Value.completed, SizeMb = entry.Value.sizeMb, City = entry.Key });
+                }
+                catch (Exception ex) { _logger.LogWarning($"DB Sync Lag: {ex.Message}"); }
             }
         }
 
@@ -70,10 +122,11 @@ namespace PakistanMaps.Services
                 if (!Directory.Exists(cityPath)) Directory.CreateDirectory(cityPath);
 
                 // 🚀 QUAD-LAYER ARCHITECTURE (Street, Satellite, ArcGIS, Night)
-                var tiles = GetTilesForBBox(task.Bbox, 0, 21);
-                long singleLayerTiles = PakistanMaps.Utils.TileCalculator.GetTotalTilesForBBox(task.Bbox, 0, 21);
-                long totalTiles = singleLayerTiles * 4; // 4 layers per tile location
-                double estimatedMb = (totalTiles * 0.015);
+                long totalTiles = PakistanMaps.Utils.TileCalculator.GetTotalTilesForBBox(task.Bbox, 0, 21);
+                // Size Estimation: 488MB for 129,240 files (32,310 locations * 4 layers) 
+                // -> 488 / 129240 = ~0.00378 MB per file. 
+                // Since totalTiles is unique locations, 4 layers per location = 0.00378 * 4 = 0.01512 MB per location set
+                double estimatedMb = (totalTiles * 0.01512); 
 
                 // 🚀 ATOMIC RECOVERY: Pre-scan folder to find already downloaded tiles
                 _logger.LogInformation($"[OMEGA] Scanning existing tiles for {task.City}...");
@@ -85,45 +138,70 @@ namespace PakistanMaps.Services
                 
                 // 🚀 FORCE INITIAL UI SYNC: Let the UI know we are starting
                 using (var pgConn = new NpgsqlConnection(pgConnString)) {
-                    await pgConn.ExecuteAsync("UPDATE downloads SET completed_tiles = @Completed WHERE city = @City", new { Completed = completed, task.City });
+                    // Since totalTiles is based on unique locations, and we have 4 layers, 
+                    // we divide 'completed' file count by 4 to get location-based progress.
+                    long completedLocations = Math.Min(completed / 4, totalTiles);
+                    await pgConn.ExecuteAsync("UPDATE downloads SET completed_tiles = @Completed, total_mb = @TotalMb WHERE city = @City", 
+                        new { Completed = completedLocations, TotalMb = estimatedMb, task.City });
+                    completed = completedLocations; // Reset local counter to start from unique location count
                 }
 
                 using var client = _httpClientFactory.CreateClient();
                 client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
 
-                // 🚀 TURBO-CHARGED ENGINE (32 Parallel Threads for Extreme Speed)
-                // Using SemaphoreSlim to prevent DB Connection Exhaustion under heavy load
-                var dbSemaphore = new SemaphoreSlim(5); 
-
-                // 🚀 INDIVIDUAL KILL-SWITCH: Per-task cancellation
+                // 🚀 TURBO-CHARGED ENGINE (Adaptive Concurrency)
                 using var taskCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                long localCounter = 0;
+                long localCompleted = completed;
+                bool isPaused = false;
+                _progressTracker[task.City] = (localCompleted, totalTiles, localCompleted * 0.01512, false);
 
-                await Parallel.ForEachAsync(tiles, new ParallelOptions { MaxDegreeOfParallelism = 32, CancellationToken = taskCts.Token }, async (tile, ct) =>
+                // Pass the task-specific token to the iterator
+                var tileSource = GetTilesForBBox(task.Bbox, 0, 21, taskCts.Token);
+
+                await Parallel.ForEachAsync(tileSource, new ParallelOptions { MaxDegreeOfParallelism = 256, CancellationToken = taskCts.Token }, async (tile, ct) =>
                 {
-                    // ⏸️ INSTANT STATUS CHECK: Check every single tile (instead of every 5)
-                    await dbSemaphore.WaitAsync(ct);
-                    try {
-                        using var checkConn = new NpgsqlConnection(pgConnString);
-                        var currentTask = await checkConn.QueryFirstOrDefaultAsync<dynamic>("SELECT status FROM downloads WHERE city = @City", new { task.City });
+                    // ⏸️ SMART PAUSE/RESUME ENGINE
+                    while (isPaused && !ct.IsCancellationRequested) {
+                        await Task.Delay(1000, ct);
                         
-                        if (currentTask == null || currentTask.status == "Stopped" || currentTask.status == "Error") {
-                            _logger.LogInformation($"[OMEGA] KILL SIGNAL RECEIVED for {task.City}. Aborting all threads.");
-                            taskCts.Cancel(); 
-                            return;
+                        // 🛰️ MASTER SYNC: While paused, threads occasionally check if they should wake up
+                        if (Interlocked.Increment(ref localCounter) % 50 == 0) {
+                             try {
+                                using var checkConn = new NpgsqlConnection(pgConnString);
+                                var t = await checkConn.QueryFirstOrDefaultAsync<dynamic>("SELECT status FROM downloads WHERE city = @City", new { City = task.City ?? "" });
+                                string? s = t?.status?.ToString();
+                                isPaused = (s == "Paused");
+                                
+                                if (string.IsNullOrEmpty(s) || s == "Stopped") { taskCts.Cancel(); return; }
+                            } catch { /* DB Busy */ }
                         }
+                    }
 
-                        if (currentTask.status == "Paused") {
-                            _logger.LogInformation($"[OMEGA] PAUSE SIGNAL for {task.City}. Waiting...");
-                            while (currentTask.status == "Paused") {
-                                await Task.Delay(500, ct); // Faster polling for instant resume
-                                currentTask = await checkConn.QueryFirstOrDefaultAsync<dynamic>("SELECT status FROM downloads WHERE city = @City", new { task.City });
-                                if (currentTask == null || currentTask.status == "Stopped") { taskCts.Cancel(); return; }
+                    // ⏸️ DB SYNC CHECK (During active work)
+                    if (Math.Abs(Interlocked.Increment(ref localCounter)) % 100 == 0)
+                    {
+                        try {
+                            using var checkConn = new NpgsqlConnection(pgConnString);
+                            var currentTask = await checkConn.QueryFirstOrDefaultAsync<dynamic>("SELECT status FROM downloads WHERE city = @City", new { City = task.City ?? "" });
+                            string? status = currentTask?.status?.ToString();
+                            
+                            isPaused = (status == "Paused");
+
+                            // Update memory tracker for UI
+                            if (task.City != null && _progressTracker.TryGetValue(task.City, out var currentProgress))
+                            {
+                                _progressTracker[task.City] = (currentProgress.completed, currentProgress.total, currentProgress.sizeMb, isPaused);
                             }
-                            _logger.LogInformation($"[OMEGA] RESUME SIGNAL for {task.City}. Continuing...");
-                        }
-                    } finally { dbSemaphore.Release(); }
 
-                    // 🛰️ MULTI-LAYER HARVESTING (Street, Satellite, ArcGIS, Night)
+                            if (string.IsNullOrEmpty(status) || status == "Stopped" || status == "Error") {
+                                taskCts.Cancel(); 
+                                return;
+                            }
+                        } catch { /* DB Busy */ }
+                    }
+
+                    // 🛰️ MULTI-LAYER HARVESTING
                     var layers = new[] {
                         (Name: "street", Url: $"https://mt1.google.com/vt/lyrs=m&x={tile.X}&y={tile.Y}&z={tile.Z}"),
                         (Name: "satellite", Url: $"https://mt1.google.com/vt/lyrs=y&x={tile.X}&y={tile.Y}&z={tile.Z}"),
@@ -133,39 +211,74 @@ namespace PakistanMaps.Services
 
                     foreach (var layer in layers)
                     {
+                        // 🛡️ PROVIDER LIMITS: ArcGIS stops at Z19. Don't waste space/bandwidth on 404s.
+                        if (layer.Name == "arcgis" && tile.Z > 19) continue;
+
                         string layerPath = Path.Combine(cityPath, layer.Name, tile.Z.ToString(), tile.X.ToString());
-                        if (!Directory.Exists(layerPath)) Directory.CreateDirectory(layerPath);
                         string filePath = Path.Combine(layerPath, $"{tile.Y}.png");
+                        string tmpPath = filePath + ".tmp";
 
                         if (!File.Exists(filePath) || new FileInfo(filePath).Length == 0)
                         {
-                            bool success = false;
-                            int retryCount = 0;
-                            while (!success && retryCount < 3)
-                            {
+                            try {
+                                // 🛡️ INTERNET AUTO-PAUSE: If internet is down, wait instead of failing
+                                while (!_isInternetAvailable && !ct.IsCancellationRequested) {
+                                    await Task.Delay(5000, ct);
+                                    
+                                    // 🛡️ CRITICAL FIX: Check if task was stopped/deleted while we were waiting
+                                    if (Interlocked.CompareExchange(ref localCounter, 0, 0) % 50 == 0) {
+                                        try {
+                                            using var checkConn = new NpgsqlConnection(pgConnString);
+                                            var currentTask = await checkConn.QueryFirstOrDefaultAsync<dynamic>("SELECT status FROM downloads WHERE city = @City", new { City = task.City ?? "" });
+                                            string? status = currentTask?.status?.ToString();
+                                            if (string.IsNullOrEmpty(status) || status == "Stopped" || status == "Error") {
+                                                taskCts.Cancel(); 
+                                                break;
+                                            }
+                                        } catch { /* DB Busy */ }
+                                    }
+                                }
+
+                                if (ct.IsCancellationRequested) break;
+
+                                var data = await client.GetByteArrayAsync(layer.Url, ct);
+                                
+                                // 🛡️ ATOMIC WRITE: Write to .tmp first then Move (Power-Off Proof)
+                                await _ioSemaphore.WaitAsync(ct);
                                 try {
-                                    var data = await client.GetByteArrayAsync(layer.Url, ct);
-                                    string tmpPath = filePath + ".tmp";
+                                    if (!Directory.Exists(layerPath)) Directory.CreateDirectory(layerPath);
+                                    
                                     await File.WriteAllBytesAsync(tmpPath, data, ct);
-                                    File.Move(tmpPath, filePath, true);
-                                    success = true;
-                                } catch { retryCount++; await Task.Delay(500 * retryCount, ct); }
+                                    if (File.Exists(filePath)) File.Delete(filePath);
+                                    File.Move(tmpPath, filePath);
+                                    
+                                    _consecutiveErrors = 0;
+                                    _isInternetAvailable = true;
+                                } finally { _ioSemaphore.Release(); }
+                            } 
+                            catch (Exception) { 
+                                // Detect internet loss - Increased threshold for 256 threads
+                                Interlocked.Increment(ref _consecutiveErrors);
+                                if (_consecutiveErrors > 200) {
+                                    _isInternetAvailable = false;
+                                    _logger.LogWarning("[OMEGA SHIELD] Connectivity issues detected. Engine entering standby...");
+                                }
+                                
+                                // Cleanup tmp if write failed
+                                if (File.Exists(tmpPath)) File.Delete(tmpPath);
                             }
                         }
                     }
 
-                    // 🛰️ COMPLETED COUNT: Count each of the 4 layers downloaded
-                    Interlocked.Add(ref completed, 4);
-                    
-                    // 🚀 INSTANT SYNC: Update DB every 4 tiles (1 full set) so UI moves IMMEDIATELY
-                    if (completed % 4 == 0)
+                    // 🛰️ PROGRESS UPDATE (In-Memory)
+                    long current = Interlocked.Increment(ref localCompleted);
+                    if (task.City != null && _progressTracker.TryGetValue(task.City, out var p))
                     {
-                        long reportCompleted = Math.Min(completed, totalTiles);
-                        using var pgConn = new NpgsqlConnection(pgConnString);
-                        await pgConn.ExecuteAsync("UPDATE downloads SET completed_tiles = @Completed, size_mb = @SizeMb WHERE city = @City", 
-                            new { Completed = reportCompleted, SizeMb = (reportCompleted * 0.015), task.City });
+                        _progressTracker[task.City] = (current, totalTiles, current * 0.01512, p.paused);
                     }
                 });
+
+                _progressTracker.TryRemove(task.City, out _);
 
                 using (var pgConn = new NpgsqlConnection(pgConnString))
                 {
@@ -223,18 +336,17 @@ namespace PakistanMaps.Services
             }
         }
 
-        private IEnumerable<(int Z, int X, int Y)> GetTilesForBBox(double[] bbox, int minZoom, int maxZoom)
+        private IEnumerable<(int Z, int X, int Y)> GetTilesForBBox(double[] bbox, int minZoom, int maxZoom, CancellationToken ct)
         {
             if (bbox == null || bbox.Length < 4) yield break;
 
-            // 🚀 SMART STREAMING: For huge areas, we process zoom by zoom to save RAM
-            // We still prioritize tiles closer to the center for immediate HD usability.
             double centerLon = (bbox[0] + bbox[2]) / 2.0;
             double centerLat = (bbox[1] + bbox[3]) / 2.0;
 
-            // We iterate through zooms
             for (int z = maxZoom; z >= minZoom; z--)
             {
+                if (ct.IsCancellationRequested) yield break;
+
                 int minX = LonToTileX(bbox[0], z);
                 int maxX = LonToTileX(bbox[2], z);
                 int minY = LatToTileY(bbox[3], z); 
@@ -243,31 +355,38 @@ namespace PakistanMaps.Services
                 int midX = LonToTileX(centerLon, z);
                 int midY = LatToTileY(centerLat, z);
 
-                // Create a small list for just THIS zoom to sort it by distance
-                // This prevents OutOfMemory because we only store one zoom's tiles at a time
-                var zoomTiles = new List<(int X, int Y, double Dist)>();
+                // For massive areas (Billion+ tiles), we skip sorting and stream directly to save RAM and CPU
+                long zoomCount = (long)(maxX - minX + 1) * (maxY - minY + 1);
                 
-                for (int x = minX; x <= maxX; x++)
+                if (zoomCount > 500000) 
                 {
-                    for (int y = minY; y <= maxY; y++)
+                    // 🚀 STREAMING MODE: No sorting for large zooms to prevent OOM
+                    for (int x = minX; x <= maxX; x++)
                     {
-                        double dist = Math.Sqrt(Math.Pow(x - midX, 2) + Math.Pow(y - midY, 2));
-                        zoomTiles.Add((x, y, dist));
-                        
-                        // 🛡️ MEMORY SAFETY VALVE: If a single zoom is TOO big (e.g. Z21 for Pakistan), 
-                        // we stream it immediately without sorting to prevent crash.
-                        if (zoomTiles.Count > 1000000) 
+                        for (int y = minY; y <= maxY; y++)
                         {
-                             foreach(var t in zoomTiles) yield return (z, t.X, t.Y);
-                             zoomTiles.Clear();
+                            if (ct.IsCancellationRequested) yield break;
+                            yield return (z, x, y);
                         }
                     }
                 }
-
-                // Sort and yield tiles for this zoom
-                foreach (var t in zoomTiles.OrderBy(t => t.Dist))
+                else 
                 {
-                    yield return (z, t.X, t.Y);
+                    // 🎯 PRECISION MODE: Sort by distance for smaller zooms
+                    var zoomTiles = new List<(int X, int Y, double Dist)>();
+                    for (int x = minX; x <= maxX; x++)
+                    {
+                        for (int y = minY; y <= maxY; y++)
+                        {
+                            double dist = Math.Sqrt(Math.Pow(x - midX, 2) + Math.Pow(y - midY, 2));
+                            zoomTiles.Add((x, y, dist));
+                        }
+                    }
+                    foreach (var t in zoomTiles.OrderBy(t => t.Dist))
+                    {
+                        if (ct.IsCancellationRequested) yield break;
+                        yield return (z, t.X, t.Y);
+                    }
                 }
             }
         }
