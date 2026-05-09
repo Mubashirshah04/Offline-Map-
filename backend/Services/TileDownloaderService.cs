@@ -205,7 +205,7 @@ namespace PakistanMaps.Services
                     var layers = new[] {
                         (Name: "street", Url: $"https://mt1.google.com/vt/lyrs=m&x={tile.X}&y={tile.Y}&z={tile.Z}"),
                         (Name: "satellite", Url: $"https://mt1.google.com/vt/lyrs=y&x={tile.X}&y={tile.Y}&z={tile.Z}"),
-                        (Name: "arcgis", Url: $"https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{tile.Z}/{tile.Y}/{tile.X}"),
+                        (Name: "arcgis", Url: $"https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{tile.Z}/{tile.Y}/{tile.X}"),
                         (Name: "night", Url: $"https://mt1.google.com/vt/lyrs=m&x={tile.X}&y={tile.Y}&z={tile.Z}&apistyle=s.t:1|p.v:on,s.t:2|p.v:off,s.t:3|p.v:on|p.c:#ff242f3e,s.t:4|p.v:on|p.c:#ff1f2835,s.t:5|p.v:on|p.c:#ff1f2835,s.t:6|p.v:on|p.c:#ff3d5afe,s.t:7|p.v:on|p.c:#ff3d5afe,s.t:8|p.v:on|p.c:#ff3d5afe,s.t:9|p.v:on|p.c:#ff3d5afe,s.t:10|p.v:on|p.c:#ff3d5afe")
                     };
 

@@ -112,13 +112,17 @@
         <div class="layer-icon-box sat-img"></div>
         <span>Satellite</span>
       </div>
+      <div class="layer-option-vertical" (click)="switchLayer('google-night')">
+        <div class="layer-icon-box night-img"></div>
+        <span>Night</span>
+      </div>
       <div class="layer-option-vertical" (click)="switchLayer('arcgis-street')">
         <div class="layer-icon-box arcgis-img"></div>
         <span>ArcGIS</span>
       </div>
       <div class="layer-option-vertical" (click)="switchLayer('arcgis-dark')">
-        <div class="layer-icon-box night-img"></div>
-        <span>Night</span>
+        <div class="layer-icon-box dark-img"></div>
+        <span>ArcGIS Dark</span>
       </div>
     </div>
   </div>
@@ -129,7 +133,7 @@
   </div>
 
   <!-- MAP CORE -->
-  <div id="map-container" [class.dark-filter]="currentLayerName === 'arcgis-dark'"></div>
+  <div id="map-container" [class.dark-filter]="currentLayerName === 'google-night' || currentLayerName === 'arcgis-dark'"></div>
 
   <!-- 📊 FOOTER -->
   <footer class="map-bottom-info">

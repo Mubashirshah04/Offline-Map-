@@ -144,6 +144,15 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
     this.loadDownloadedRegions();
     this.startStatsPolling();
 
+    // 🚀 VISIBILITY API: Save battery & bandwidth when tab is hidden
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        this.startStatsPolling(5000); // Slow down to 5s
+      } else {
+        this.startStatsPolling(1000); // Back to 1s
+      }
+    });
+
     // 🚀 SMART SEARCH DEBOUNCE: Prevents 429 Errors
     this.searchSub = this.searchSubject.pipe(
       debounceTime(500),
@@ -185,8 +194,12 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
       },
       center: startPos,
       zoom: startZoom,
-      attributionControl: false
-    });
+      attributionControl: false,
+      antialias: true, // 🚀 HIGH QUALITY RENDERING
+      maxPitch: 85,
+      bearingSnap: 7,
+      trackResize: true
+    } as any);
 
     this.map.on('load', () => {
       this.switchLayer(this.currentLayerName);
@@ -255,6 +268,7 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
   public switchLayer(layerName: string, cityOverride?: string): void {
     if (!this.map || !this.map.isStyleLoaded()) return;
     this.currentLayerName = layerName;
+    console.log("🚀 Switching Layer to:", layerName);
 
     // Smart Offline Detection: If offline and no override, pick the first downloaded region
     let targetCity = cityOverride || (this.downloadStatus.active ? this.downloadStatus.city : null);
@@ -343,6 +357,7 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
       let layerFolder = 'street';
       if (layerName.includes('satellite') || layerName.includes('hybrid')) layerFolder = 'satellite';
       if (layerName.includes('arcgis')) layerFolder = 'arcgis';
+      if (layerName.includes('night')) layerFolder = 'night';
 
       const localUrl = `${this.baseUrl}/tiles/${folderPath}/${layerFolder}/{z}/{x}/{y}.png`;
 
@@ -362,9 +377,10 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
       if (layerName.includes('satellite') || layerName.includes('hybrid')) {
         onlineUrl = `https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}`;
       } else if (layerName.includes('arcgis')) {
-        onlineUrl = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}`;
+        onlineUrl = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}`;
       } else if (layerName.includes('dark') || layerName.includes('night')) {
-        onlineUrl = `https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}&apistyle=s.t:1|p.v:on,s.t:2|p.v:off,s.t:3|p.v:on|p.c:#ff242f3e,s.t:4|p.v:on|p.c:#ff1f2835,s.t:5|p.v:on|p.c:#ff1f2835,s.t:6|p.v:on|p.c:#ff3d5afe,s.t:7|p.v:on|p.c:#ff3d5afe,s.t:8|p.v:on|p.c:#ff3d5afe,s.t:9|p.v:on|p.c:#ff3d5afe,s.t:10|p.v:on|p.c:#ff3d5afe`;
+        // 🌑 ULTRA-NIGHT STYLE: Simplified and confirmed Google apistyle
+        onlineUrl = `https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}&apistyle=s.t:1|p.v:on,s.t:2|p.v:off,s.t:3|p.v:on|p.c:#ff242f3e,s.t:4|p.v:on|p.c:#ff1f2835`;
       }
 
       this.map.addSource('base-source', {
@@ -450,8 +466,9 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
 
   public stopDownload(): void {
     fetch(`${this.baseUrl}/stop-download`, { method: 'POST' }).then(() => {
-      this.downloadStatus.active = false;
+      this.downloadStatus = { active: false, total: 0, completed: 0, city: '', paused: false, totalMb: 0, mb: 0 };
       this.isHarvesting = false;
+      localStorage.removeItem('omega_active_download');
       this.loadDownloadedRegions();
     });
   }
@@ -528,46 +545,55 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
       })
     }).then(() => {
       this.closeModal();
-      this.startStatsPolling();
+      this.downloadStatus.active = true;
+      this.downloadStatus.city = this.customModal.city;
+      this.startStatsPolling(500); // 🚀 INSTANT FEEDBACK
     });
   }
 
-  private startStatsPolling(): void {
+  public startStatsPolling(interval: number = 500): void {
     if (this.statsInterval) clearInterval(this.statsInterval);
     this.statsInterval = setInterval(() => {
-      this.loadDownloadedRegions();
+      // Don't poll regions every second, only every 10 seconds to reduce DB load
+      if (Date.now() % 10000 < interval) this.loadDownloadedRegions();
 
-      fetch(`${this.baseUrl}/download-status?t=${Date.now()}`).then(r => r.json()).then(status => {
-        if (status.active) {
-            this.downloadStatus = {
-              active: true,
-              city: status.city,
-              completed: status.completed,
-              total: status.total,
-              mb: status.mb,
-              totalMb: status.totalMb,
-              paused: status.paused || false
-            };
-            // Cache active state so refresh doesn't hide it
-            localStorage.setItem('omega_active_download', JSON.stringify(this.downloadStatus));
-        } else {
-          localStorage.removeItem('omega_active_download');
-          const auto = this.downloadedRegions.find(r => r.city === 'Auto-Discovered Data');
-          if (auto && (auto.status.includes('Capturing') || auto.status.includes('Harvesting') || auto.status.includes('Planning'))) {
-            this.downloadStatus = {
-              active: true,
-              city: '🛰️ ' + auto.city,
-              completed: auto.completed_tiles || 0,
-              total: auto.total_tiles || 0,
-              mb: parseFloat(auto.size_mb || 0).toFixed(2),
-              totalMb: ((auto.total_tiles || 0) * 0.006).toFixed(2)
-            };
+      const pollUrl = `${this.baseUrl}/download-status?t=${Date.now()}`;
+      fetch(pollUrl, { cache: 'no-store', signal: AbortSignal.timeout(5000) })
+        .then(r => r.json())
+        .then(status => {
+          if (status.active) {
+              this.downloadStatus = {
+                active: true,
+                city: status.city,
+                completed: status.completed,
+                total: status.total,
+                mb: status.mb,
+                totalMb: status.totalMb,
+                paused: status.paused || false
+              };
+              localStorage.setItem('omega_active_download', JSON.stringify(this.downloadStatus));
           } else {
-            this.downloadStatus.active = false;
+            // Check auto-discovery if no explicit task
+            const auto = this.downloadedRegions.find(r => r.city.includes('Auto-Discovered'));
+            if (auto && (auto.status.includes('Harvesting') || auto.status.includes('Queued'))) {
+               this.downloadStatus = {
+                 active: true,
+                 city: '🛰️ ' + auto.city,
+                 completed: auto.completed_tiles,
+                 total: auto.total_tiles,
+                 mb: auto.size_mb,
+                 totalMb: (auto.total_tiles * 0.012).toFixed(2)
+               };
+            } else {
+              localStorage.removeItem('omega_active_download');
+              this.downloadStatus.active = false;
+            }
           }
-        }
-        this.cdr.detectChanges();
-      });
+          this.cdr.detectChanges();
+        })
+        .catch(err => {
+          console.warn("OMEGA Shield: Polling retrying in next tick...");
+        });
     }, 1000);
   }
 
@@ -605,6 +631,8 @@ export class MapComponent implements OnInit, AfterViewInit, OnDestroy {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ city: this.customModal.city })
     }).then(() => {
+      this.downloadStatus = { active: false, total: 0, completed: 0, city: '', paused: false, totalMb: 0, mb: 0 };
+      localStorage.removeItem('omega_active_download');
       this.closeModal();
       this.loadDownloadedRegions();
       this.cdr.detectChanges();

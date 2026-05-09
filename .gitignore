@@ -11,8 +11,10 @@ backend/bin/
 backend/obj/
 frontend/node_modules/
 backend/node_modules/
-wwwroot/tiles/
-wwwroot/data/
+backend/wwwroot/tiles/
+backend/wwwroot/data/
+**/wwwroot/tiles/
+**/wwwroot/data/
 tiles.db
 *.mbtiles
 *.exe
