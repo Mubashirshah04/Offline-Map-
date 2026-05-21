@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Text.Json;
 using Dapper;
 using Npgsql;
@@ -80,7 +81,14 @@ namespace PakistanMaps.Services
             {
                 if (_queue.TryDequeue(out var task))
                 {
-                    await ProcessDownloadAsync(task, stoppingToken);
+                    try { await ProcessDownloadAsync(task, stoppingToken); }
+                    catch (Exception ex) {
+                        _logger.LogError(ex, $"[OMEGA GUARDIAN] Unhandled crash for {task.City}. Service protected.");
+                        try {
+                            using var ec = new NpgsqlConnection(_config.GetConnectionString("PostgreSQLConnection")!);
+                            await ec.ExecuteAsync("UPDATE downloads SET status = 'Error' WHERE city = @City", new { task.City });
+                        } catch { /* DB also unavailable — skip */ }
+                    }
                 }
                 else
                 {
@@ -121,45 +129,56 @@ namespace PakistanMaps.Services
                 string cityPath = Path.Combine(wwwrootPath, task.City.Replace(" ", "_"));
                 if (!Directory.Exists(cityPath)) Directory.CreateDirectory(cityPath);
 
-                // 🚀 QUAD-LAYER ARCHITECTURE (Street, Satellite, ArcGIS, Night)
-                long totalTiles = PakistanMaps.Utils.TileCalculator.GetTotalTilesForBBox(task.Bbox, 0, 21);
-                // Size Estimation: 488MB for 129,240 files (32,310 locations * 4 layers) 
-                // -> 488 / 129240 = ~0.00378 MB per file. 
-                // Since totalTiles is unique locations, 4 layers per location = 0.00378 * 4 = 0.01512 MB per location set
-                double estimatedMb = (totalTiles * 0.01512); 
+                // 🚀 3-LAYER ARCHITECTURE - OPTIMIZED for 8TB - ALL COUNTRIES
+                // 🌾 Z0-Z17: 3 layers full country (Google St, Google Sat, ArcGIS St)
+                // 🏘️ Z18: 3 layers cities only
+                // 🏙️ Z19-Z21: 2 layers cities only (NO ArcGIS at Z20-Z21)
+                long totalTiles = PakistanMaps.Utils.TileCalculator.GetTotalTilesForBBox(task.Bbox, 0, 21, task.City);
+                // totalTiles now includes layer multiplier
+                // 8TB max limit for Full Pakistan
+                double estimatedMb = Math.Min(8000000, totalTiles * 0.006); // 6KB per tile file, cap at 8TB 
 
-                // 🚀 ATOMIC RECOVERY: Pre-scan folder to find already downloaded tiles
+                // 🚀 ATOMIC RECOVERY: Pre-scan folder (fast async, 30s timeout to prevent OOM)
                 _logger.LogInformation($"[OMEGA] Scanning existing tiles for {task.City}...");
                 long completed = 0;
                 if (Directory.Exists(cityPath)) {
-                    // Use EnumerateFiles to avoid hanging on millions of files
-                    completed = Directory.EnumerateFiles(cityPath, "*.png", SearchOption.AllDirectories).Count();
+                    try {
+                        using var scanCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                        completed = await Task.Run(() => {
+                            long count = 0;
+                            foreach (var _ in Directory.EnumerateFiles(cityPath, "*.png", SearchOption.AllDirectories))
+                            { if (scanCts.IsCancellationRequested) break; count++; }
+                            return count;
+                        }, scanCts.Token);
+                    } catch { completed = 0; }
                 }
                 
                 // 🚀 FORCE INITIAL UI SYNC: Let the UI know we are starting
                 using (var pgConn = new NpgsqlConnection(pgConnString)) {
-                    // Since totalTiles is based on unique locations, and we have 4 layers, 
-                    // we divide 'completed' file count by 4 to get location-based progress.
-                    long completedLocations = Math.Min(completed / 4, totalTiles);
+                    // completed is file count, totalTiles is file count (includes layers)
+                    long completedFiles = Math.Min(completed, totalTiles);
                     await pgConn.ExecuteAsync("UPDATE downloads SET completed_tiles = @Completed, total_mb = @TotalMb WHERE city = @City", 
-                        new { Completed = completedLocations, TotalMb = estimatedMb, task.City });
-                    completed = completedLocations; // Reset local counter to start from unique location count
+                        new { Completed = completedFiles, TotalMb = estimatedMb, task.City });
+                    completed = completedFiles; // Keep as file count
                 }
 
                 using var client = _httpClientFactory.CreateClient();
                 client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
 
-                // 🚀 TURBO-CHARGED ENGINE (Adaptive Concurrency)
+                // 🚀 DOWNLOAD ENGINE
                 using var taskCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                 long localCounter = 0;
                 long localCompleted = completed;
                 bool isPaused = false;
-                _progressTracker[task.City] = (localCompleted, totalTiles, localCompleted * 0.01512, false);
+                _progressTracker[task.City] = (localCompleted, totalTiles, localCompleted * 0.006, false);
 
                 // Pass the task-specific token to the iterator
-                var tileSource = GetTilesForBBox(task.Bbox, 0, 21, taskCts.Token);
+                // 🧠 SMART GENERATOR: Z0-Z19 full bbox + Z20-Z21 only for cities
+                var tileSource = GetTilesSmart(task.Bbox, task.City, taskCts.Token);
 
-                await Parallel.ForEachAsync(tileSource, new ParallelOptions { MaxDegreeOfParallelism = 256, CancellationToken = taskCts.Token }, async (tile, ct) =>
+                _logger.LogInformation($"[OMEGA] 🚀 Download engine STARTED for {task.City}. Total={totalTiles}, AlreadyDone={localCompleted}");
+
+                await Parallel.ForEachAsync(tileSource, new ParallelOptions { MaxDegreeOfParallelism = 32, CancellationToken = taskCts.Token }, async (tile, ct) =>
                 {
                     // ⏸️ SMART PAUSE/RESUME ENGINE
                     while (isPaused && !ct.IsCancellationRequested) {
@@ -201,19 +220,21 @@ namespace PakistanMaps.Services
                         } catch { /* DB Busy */ }
                     }
 
-                    // 🛰️ MULTI-LAYER HARVESTING
-                    var layers = new[] {
-                        (Name: "street", Url: $"https://mt1.google.com/vt/lyrs=m&x={tile.X}&y={tile.Y}&z={tile.Z}"),
-                        (Name: "satellite", Url: $"https://mt1.google.com/vt/lyrs=y&x={tile.X}&y={tile.Y}&z={tile.Z}"),
-                        (Name: "arcgis", Url: $"https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{tile.Z}/{tile.Y}/{tile.X}"),
-                        (Name: "night", Url: $"https://mt1.google.com/vt/lyrs=m&x={tile.X}&y={tile.Y}&z={tile.Z}&apistyle=s.t:1|p.v:on,s.t:2|p.v:off,s.t:3|p.v:on|p.c:#ff242f3e,s.t:4|p.v:on|p.c:#ff1f2835,s.t:5|p.v:on|p.c:#ff1f2835,s.t:6|p.v:on|p.c:#ff3d5afe,s.t:7|p.v:on|p.c:#ff3d5afe,s.t:8|p.v:on|p.c:#ff3d5afe,s.t:9|p.v:on|p.c:#ff3d5afe,s.t:10|p.v:on|p.c:#ff3d5afe")
+                    // 🛰️ 3-LAYER HARVESTING (Google Street, Google Satellite, ArcGIS Street ONLY)
+                    // 🗺️ ARCGIS LIMIT: Z19 max (ArcGIS doesn't support Z20/Z21)
+                    var layers = new List<(string Name, string Url)> {
+                        ("street",    $"https://mt1.google.com/vt/lyrs=m&x={tile.X}&y={tile.Y}&z={tile.Z}"),
+                        ("satellite", $"https://mt1.google.com/vt/lyrs=y&x={tile.X}&y={tile.Y}&z={tile.Z}")
                     };
+                    
+                    // Add ArcGIS Street ONLY for Z19 and below (NO ArcGIS Satellite)
+                    if (tile.Z <= 19) {
+                        layers.Add(("arcgis-street", $"https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{tile.Z}/{tile.Y}/{tile.X}"));
+                    }
+
 
                     foreach (var layer in layers)
                     {
-                        // 🛡️ PROVIDER LIMITS: ArcGIS stops at Z19. Don't waste space/bandwidth on 404s.
-                        if (layer.Name == "arcgis" && tile.Z > 19) continue;
-
                         string layerPath = Path.Combine(cityPath, layer.Name, tile.Z.ToString(), tile.X.ToString());
                         string filePath = Path.Combine(layerPath, $"{tile.Y}.png");
                         string tmpPath = filePath + ".tmp";
@@ -274,7 +295,8 @@ namespace PakistanMaps.Services
                     long current = Interlocked.Increment(ref localCompleted);
                     if (task.City != null && _progressTracker.TryGetValue(task.City, out var p))
                     {
-                        _progressTracker[task.City] = (current, totalTiles, current * 0.01512, p.paused);
+                        // current and totalTiles are already file counts (include layers)
+                        _progressTracker[task.City] = (current, totalTiles, current * 0.006, p.paused);
                     }
                 });
 
@@ -291,8 +313,10 @@ namespace PakistanMaps.Services
             {
                 if (ex is OperationCanceledException) return;
                 _logger.LogError(ex, $"[OMEGA] Error harvesting {task.City}");
-                using var pgConn = new NpgsqlConnection(pgConnString);
-                await pgConn.ExecuteAsync("UPDATE downloads SET status = 'Error' WHERE city = @City", new { task.City });
+                try {
+                    using var pgConn = new NpgsqlConnection(pgConnString);
+                    await pgConn.ExecuteAsync("UPDATE downloads SET status = 'Error' WHERE city = @City", new { task.City });
+                } catch { /* DB unavailable during error recovery — ignore */ }
             }
         }
 
@@ -391,15 +415,85 @@ namespace PakistanMaps.Services
             }
         }
 
-        private int LonToTileX(double lon, int z)
-        {
-            return (int)(Math.Floor((lon + 180.0) / 360.0 * (1 << z)));
-        }
+        private int LonToTileX(double lon, int z) =>
+            (int)Math.Floor((lon + 180.0) / 360.0 * (1 << z));
 
         private int LatToTileY(double lat, int z)
         {
             double latRad = lat * Math.PI / 180.0;
             return (int)(Math.Floor((1.0 - Math.Asinh(Math.Tan(latRad)) / Math.PI) / 2.0 * (1 << z)));
+        }
+
+        // 🧠 SMART TILE GENERATOR - 8TB OPTIMIZED - ALL COUNTRIES
+        // 🌾 Z0-Z17: Full country | 🏘️ Z18: Cities | 🏙️ Z19-Z21: Cities
+        // 🗺️ ARCGIS: Z19 max | 3 layers: Z0-Z19 | 2 layers: Z20-Z21
+        private IEnumerable<(int Z, int X, int Y)> GetTilesSmart(double[] bbox, string country, CancellationToken ct)
+        {
+            if (bbox == null || bbox.Length < 4) yield break;
+            
+            // Select appropriate city zones
+            var cityZones = IsPakistan(country) 
+                ? PakistanMaps.Utils.TileCalculator.PakistanCities 
+                : PakistanMaps.Utils.TileCalculator.WorldCities;
+
+            // Phase 1: 🌾 Z0-Z17 Full country (all areas — roads visible everywhere)
+            foreach (var tile in GetTilesForBBox(bbox, 0, 17, ct))
+                yield return tile;
+
+            // Phase 2: 🏘️ Z18 only inside populated city bounding boxes (cities/towns)
+            foreach (var zone in cityZones)
+            {
+                if (ct.IsCancellationRequested) yield break;
+                double iMinLon = Math.Max(bbox[0], zone.minLon);
+                double iMinLat = Math.Max(bbox[1], zone.minLat);
+                double iMaxLon = Math.Min(bbox[2], zone.maxLon);
+                double iMaxLat = Math.Min(bbox[3], zone.maxLat);
+                if (iMinLon >= iMaxLon || iMinLat >= iMaxLat) continue;
+                double[] zoneBbox = [iMinLon, iMinLat, iMaxLon, iMaxLat];
+                foreach (var tile in GetTilesForBBox(zoneBbox, 18, 18, ct))
+                    yield return tile;
+            }
+
+            // Phase 3: 🏙️ Z19-Z21 only inside populated city bounding boxes
+            foreach (var zone in cityZones)
+            {
+                if (ct.IsCancellationRequested) yield break;
+                double iMinLon = Math.Max(bbox[0], zone.minLon);
+                double iMinLat = Math.Max(bbox[1], zone.minLat);
+                double iMaxLon = Math.Min(bbox[2], zone.maxLon);
+                double iMaxLat = Math.Min(bbox[3], zone.maxLat);
+                if (iMinLon >= iMaxLon || iMinLat >= iMaxLat) continue;
+                double[] zoneBbox = [iMinLon, iMinLat, iMaxLon, iMaxLat];
+                foreach (var tile in GetTilesForBBox(zoneBbox, 19, 21, ct))
+                    yield return tile;
+            }
+        }
+
+        // � HELPER: Check if country is Pakistan
+        private static bool IsPakistan(string country)
+        {
+            if (string.IsNullOrEmpty(country)) return false;
+            var pakNames = new[] { "pakistan", "all pakistan", "punjab", "sindh", "kpk", "balochistan", "gilgit", "ajk", "kashmir" };
+            return pakNames.Any(p => country.ToLower().Contains(p));
+        }
+
+        private static (double Lat, double Lon) TileToLatLon(int x, int y, int z)
+        {
+            double n   = Math.PI - 2.0 * Math.PI * y / Math.Pow(2.0, z);
+            double lon = (double)x / Math.Pow(2.0, z) * 360.0 - 180.0;
+            double lat = 180.0 / Math.PI * Math.Atan(0.5 * (Math.Exp(n) - Math.Exp(-n)));
+            return (lat, lon);
+        }
+
+        private static bool IsInPopulatedZone(double lat, double lon, string country)
+        {
+            var cityZones = IsPakistan(country) 
+                ? PakistanMaps.Utils.TileCalculator.PakistanCities 
+                : PakistanMaps.Utils.TileCalculator.WorldCities;
+            foreach (var z in cityZones)
+                if (lat >= z.minLat && lat <= z.maxLat && lon >= z.minLon && lon <= z.maxLon)
+                    return true;
+            return false;
         }
     }
 
